@@ -1,0 +1,126 @@
+//
+//  Reducer.swift
+//  Reducer
+//
+//  Created by CHEN Xian-an on 2019/4/15.
+//  Copyright © 2019 realazy. All rights reserved.
+//
+
+import Foundation
+
+public enum Reducer {} // As namespace only
+
+extension Reducer {
+public class Updater<S> {
+  private let sharer: StateSharer<S>
+  private let notificationObject: NSObjectProtocol
+  private let notificationName: Notification.Name
+
+  fileprivate init(sharer: StateSharer<S>, notificationObject: NSObjectProtocol, notificationName: Notification.Name) {
+    self.sharer = sharer
+    self.notificationObject = notificationObject
+    self.notificationName = notificationName
+  }
+
+  public subscript<V>(keyPath keyPath: WritableKeyPath<S, V>) -> V {
+    get { return sharer.state[keyPath: keyPath] }
+    set {
+      let old = sharer.state
+      sharer.state[keyPath: keyPath] = newValue
+      let new = sharer.state
+      NotificationCenter.default.post(name: notificationName, object: notificationObject, userInfo: [
+        UserInfoKeys.keyPath: keyPath,
+        UserInfoKeys.oldState: old,
+        UserInfoKeys.newState: new
+      ])
+    }
+  }
+}
+
+public struct Change<V: Equatable> {
+  public let new: V
+  public let old: V
+  public let isInitial: Bool
+}
+
+public struct Observation {
+  private let observer: NSObjectProtocol
+  fileprivate init(observer: NSObjectProtocol) { self.observer = observer }
+
+  public func invalidate() { NotificationCenter.default.removeObserver(observer) }
+}
+
+public class Observer<S> {
+  private let sharer: StateSharer<S>
+  private let notificationObject: NSObjectProtocol
+  private let notificationName: Notification.Name
+
+  fileprivate init(sharer: StateSharer<S>, notificationObject: NSObjectProtocol, notificationName: Notification.Name) {
+    self.sharer = sharer
+    self.notificationObject = notificationObject
+    self.notificationName = notificationName
+  }
+
+  @discardableResult
+  private func observe(keyPaths: [PartialKeyPath<S>], action: @escaping (_ old: S, _ new: S, _ updatedFromKeyPath: PartialKeyPath<S>?) -> Void) -> Observation {
+    let observer = NotificationCenter.default.addObserver(forName: notificationName, object: notificationObject, queue: OperationQueue.main) { notification in
+      guard
+        let keyPath = notification.userInfo?[UserInfoKeys.keyPath] as? PartialKeyPath<S>,
+        let oldState = notification.userInfo?[UserInfoKeys.oldState] as? S,
+        let newState = notification.userInfo?[UserInfoKeys.newState] as? S
+      else { return }
+      action(oldState, newState, keyPath)
+    }
+    let initialState = sharer.state
+    action(initialState, initialState, nil)
+    return Observation(observer: observer)
+  }
+% generic_type_names = "ABCDEFGHIJKLMNOP"
+% for i in range(1, len(generic_type_names)+1):
+%   type_names = generic_type_names[0:i]
+%   type_names_list = list(type_names)
+%   func_name = "observeKeyPath" if i == 1 else "observeKeyPaths"
+%   generics = ", ".join(type_names)
+%   key_path_arg_types = ", ".join(map(lambda t: "_ keyPath{0}: KeyPath<S, {0}>".format(t), type_names_list))
+%   action_arg_types = ", ".join(map(lambda t: "Change<{0}>".format(t), type_names_list))
+%   key_path_args = ", ".join(map(lambda t: "keyPath{0}".format(t), type_names_list))
+%   should_send_action_conditions = "\n         || ".join(map(lambda t: "keyPath{0} == updatedFromKeyPath || old[keyPath: keyPath{0}] != new[keyPath: keyPath{0}]".format(t), type_names_list))
+%   action_args = ",\n          ".join(map(lambda t: "Change(new: new[keyPath: keyPath{0}], old: old[keyPath: keyPath{0}], isInitial: isInitial)".format(t), type_names_list))
+
+  @discardableResult
+  public func ${func_name}<${generics}>(${key_path_arg_types}, action: @escaping (${action_arg_types}) -> Void) -> Observation {
+    return observe(keyPaths: [${key_path_args}]) { old, new, updatedFromKeyPath in
+      let isInitial = updatedFromKeyPath == nil
+      if isInitial
+         || ${should_send_action_conditions} {
+        action(
+          ${action_args}
+        )
+      }
+    }
+  }
+% end
+}
+
+public static func use<State, Action>(initialState: State, reducer: @escaping (_ state: Updater<State>, _ action: Action) -> Void) -> (state: Observer<State>, dispatch: (Action) -> Void) {
+  let sharer = StateSharer(state: initialState)
+  let notiName = Notification.Name(UUID.init().uuidString)
+  let notiSender = NSObject()
+  let updater = Updater(sharer: sharer, notificationObject: notiSender, notificationName: notiName)
+  let observer = Observer(sharer: sharer, notificationObject: notiSender, notificationName: notiName)
+  let dispatch: (Action) -> Void = { action in reducer(updater, action) }
+  return (observer, dispatch)
+}
+}
+
+private enum UserInfoKeys {
+  static let keyPath = "keyPath"
+  static let oldState = "oldState"
+  static let newState = "newState"
+}
+
+private class StateSharer<S> {
+  var state: S
+
+  init(state: S) { self.state = state }
+}
